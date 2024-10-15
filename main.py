@@ -4,7 +4,6 @@ import logging
 from pymongo import MongoClient
 import gridfs
 import hashlib
-import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -83,27 +82,44 @@ def generate_summary():
     
 def digest_database():
     """
-    Iterates through all documents in the database and adds a hash value for the file data to the metadata of the document.
+    Iterates through all documents in the database and adds metadata (such as hash value, file type, size, last modified time, and MIME type) for the file data. If all required fields are already present in a document, it will skip further processing to avoid redundant work.
     """
     total_files = collection.count_documents({})
     logging.info(f"Digesting metadata for {total_files} files in the database.")
 
     processed_files = 0
     for document in collection.find(no_cursor_timeout=True, batch_size=10):
+        # Check if all metadata properties already exist
+        required_fields = ['file_hash', 'file_type', 'file_size', 'last_modified', 'mime_type']
+        if all(field in document for field in required_fields):
+            continue
+        # Check if metadata already exists
         file_id = document['file_id']
         try:
             grid_out = fs.get(file_id)
-            file_content = grid_out.read(1024 * 1024)  # Read 1MB at a time to limit memory usage
+            hasher = hashlib.sha256()
+            file_size = 0
+            while True:
+                file_content = grid_out.read(1024 * 1024)  # Read 1MB at a time to limit memory usage
+                if not file_content:
+                    break
+                hasher.update(file_content)
+                file_size += len(file_content)
             grid_out.close()
             hasher = hashlib.sha256()
             while file_content:
                 hasher.update(file_content)
                 file_content = grid_out.read(1024 * 1024)  # Continue reading in chunks
             file_hash = hasher.hexdigest()
+            last_modified = document.get('last_modified', 'unknown')  # Placeholder for future timestamp extraction
 
-            # Update the document with the new hash
-            collection.update_one({'_id': document['_id']}, {'$set': {'file_hash': file_hash}})
-            logging.info(f"Updated hash for file with ID: {file_id}")
+            # Update the document with the new metadata
+            update_fields = {
+                'file_hash': file_hash,
+                'file_size': file_size,
+                'last_modified': last_modified,
+            }
+            collection.update_one({'_id': document['_id']}, {'$set': update_fields})
         except gridfs.errors.NoFile:
             logging.warning(f"File with ID {file_id} not found in GridFS.")
 
