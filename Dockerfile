@@ -1,17 +1,17 @@
-# Use an official Python runtime as the base image
-FROM python:3.9-slim
+FROM python:3.12-slim
 
-# Set the working directory in the container
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Copy the requirements file
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the Python dependencies
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY main.py .
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+RUN useradd --create-home --uid 1000 app && chown -R app:app /app
+USER app
 
-# Command to run the application
-CMD ["python", "main.py"]
+ENTRYPOINT ["python", "main.py"]
+CMD ["--help"]

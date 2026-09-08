@@ -1,25 +1,30 @@
 services:
   mongodb:
-    image: mongo:latest
+    image: mongo:7
     container_name: mongodb_container
     ports:
-      - "27017:27017"
+      # Bound to loopback so the database is reachable from this machine only.
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: python_app_container
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
     volumes:
-      - .:/app
-      - C:\Users\codys\Downloads:/data
+      - ${SOURCE_DIR:-./data}:/data:ro
     environment:
-      - MONGO_URI=mongodb://mongodb:27017
-    command: sh -c "python main.py /data $APP_ARGS"
+      MONGO_URI: mongodb://mongodb:27017/
+    # Override with APP_ARGS in .env, e.g. "summary" or "upload /data --dry-run".
+    command: ${APP_ARGS:-upload /data}
 
 volumes:
   mongodb_data:

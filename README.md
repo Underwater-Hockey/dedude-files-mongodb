@@ -1,115 +1,115 @@
-# Hash-Based File Verification Project
+# dedupe-files-mongodb
 
-## Overview
-This project provides a set of tools to manage, verify, and deduplicate files using MongoDB as a backend. It includes operations for uploading files, generating file hashes, digesting metadata, and identifying duplicate files in a collection. The project is designed to manage large datasets by storing the file contents in MongoDB using GridFS and maintaining metadata for quick access and verification.
+Archive the files in a directory into MongoDB GridFS, deduplicated by content.
 
-## Features
-- **Upload Files**: Uploads files from a directory to MongoDB using GridFS, storing file metadata in a separate collection.
-- **Check Existing Files**: Check which files in a directory already exist in the database based on their original file paths.
-- **Digest Database**: Iterates through all documents in the database to compute a hash value for the file data and add it to the document metadata.
-- **Generate Summary**: Provides a summary of the current state of the database, including the total number of files and the number of matching file hashes.
-- **Find Duplicate Files**: Identifies and provides an example of two files with matching hashes for review.
+Every file is hashed with SHA-256 as it is read. The bytes are stored in GridFS
+only the first time a hash is seen; any later file with identical content gets a
+metadata document that points at the blob already stored. That makes it cheap to
+find duplicates across large collections and keeps storage proportional to the
+amount of *unique* content, not the number of files.
 
-## Prerequisites
-- **Python 3.6+**
-- **Docker** (recommended for easy deployment)
-- **MongoDB**
+## Requirements
 
-## Installation
-1. **Clone the Repository**:
-   ```sh
-   git clone <repository-url>
-   cd hash-based-file-verification
-   ```
+- Python 3.12 or newer, or Docker
+- MongoDB 5 or newer
 
-2. **Install Dependencies**:
-   Use the `requirements.txt` to install the required Python packages.
-   ```sh
-   pip install -r requirements.txt
-   ```
+## Quick start (local Python)
 
-3. **Setup MongoDB**:
-   You can either install MongoDB locally or use Docker to run it.
-   
-   To run MongoDB in Docker:
-   ```sh
-   docker run -d -p 27017:27017 --name mongodb mongo:latest
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-4. **Environment Setup**:
-   Set the MongoDB URI as an environment variable if you are using Docker:
-   ```sh
-   export MONGO_URI=mongodb://localhost:27017/
-   ```
+Start MongoDB however you like, for example:
 
-## Usage
-The script provides several options for interacting with the database and files.
+```bash
+docker run -d --name mongodb -p 127.0.0.1:27017:27017 mongo:7
+```
 
-### Command-Line Arguments
-- **Upload Files**
-  ```sh
-  python main.py <directory_path>
-  ```
-  Uploads all files in the specified directory to the database.
+Then index a directory:
 
-- **Dry Run**
-  ```sh
-  python main.py <directory_path> --dry-run
-  ```
-  Performs a dry run of the upload process without actually uploading the files.
+```bash
+python main.py upload ~/Downloads
+```
 
-- **Check Existing Files**
-  ```sh
-  python main.py <directory_path> --check
-  ```
-  Checks how many files in the directory are new versus those that already exist in the database.
+The connection string comes from `MONGO_URI` or `--mongo-uri` and defaults to
+`mongodb://localhost:27017/`. The database name comes from `MONGO_DB` or `--db`
+and defaults to `hash_index_db`.
 
-- **Generate Summary**
-  ```sh
-  python main.py --summary
-  ```
-  Generates a summary of the state of the file contents in the database, including the total number of files and the number of matching hashes.
+## Commands
 
-- **Digest Database**
-  ```sh
-  python main.py --digest
-  ```
-  Iterates through all documents in the database, computing a hash for each file and updating the metadata accordingly.
+| Command | What it does |
+| --- | --- |
+| `upload DIR [--dry-run] [--source NAME]` | Index every file under `DIR`. Already indexed paths are skipped, so re-running is safe. `--dry-run` hashes and reports without writing. |
+| `check DIR [--source NAME]` | Count how many files under `DIR` are new versus already indexed. |
+| `digest [--force]` | Compute hash and size for documents that lack them, such as those written by older versions of this tool. `--force` re-hashes everything. |
+| `summary` | Totals: indexed files, stored blobs, duplicate groups, redundant files and bytes, plus one example group. |
+| `duplicates [--limit N]` | List groups of files with identical content, largest groups first. `--limit 0` shows all. |
 
-## Example Output
-- **Upload Progress**: Logs progress as files are uploaded, with the option for a dry run.
-- **Summary**: Logs total number of files, number of matching file hashes, and an example pair of matching files.
-- **Digest Process**: Logs progress as it computes and updates hashes for each document.
+Add `-v` before the command to log every file.
 
-## Docker Setup
-To run both the MongoDB instance and the Python application using Docker Compose:
+### Sources and paths
 
-1. **Create a Docker Compose File**:
-   Use a `docker-compose.yml` file to define the services (MongoDB and the Python app).
+Paths are stored relative to the directory you scan, labelled with a *source*
+name that defaults to the directory's own name. The pair (source, relative path)
+is unique. Pass `--source` explicitly when the same content is reachable under
+different roots, for example a host directory mounted at `/data` inside Docker,
+so re-runs recognise files that were already indexed.
 
-2. **Build and Run Containers**:
-   ```sh
-   docker-compose up --build
-   ```
-   This will start both MongoDB and the Python application in the specified configuration.
+## Docker Compose
 
-## Logging
-- **Info Level Logs**: Provides detailed logging of progress, such as uploads, checks, and digest updates.
-- **Warnings**: Issues warnings if files are missing or if other anomalies are detected.
+Copy `.env.example` to `.env` and set `SOURCE_DIR` to the host directory you want
+to scan. It is mounted read-only at `/data` inside the app container.
 
-## Notes
-- **Memory Management**: The `digest_database` function reads files in chunks to prevent excessive memory usage.
-- **Cursor Timeout**: The database cursor has been set to `no_cursor_timeout=True` to prevent the process from being killed prematurely while iterating through large datasets.
+```bash
+docker compose up --build
+```
 
-## Contributing
-Feel free to fork this repository, create issues, or submit pull requests. Contributions are always welcome!
+`APP_ARGS` in `.env` selects the command. Examples:
+
+```
+APP_ARGS=upload /data --source Downloads
+APP_ARGS=upload /data --dry-run
+APP_ARGS=summary
+APP_ARGS=duplicates --limit 0
+```
+
+The compose file publishes MongoDB on `127.0.0.1:27017` so you can inspect the
+database with local tools. The app container waits for MongoDB's healthcheck
+before starting.
+
+## Data model
+
+Collection `files`, one document per indexed path:
+
+| Field | Meaning |
+| --- | --- |
+| `file_id` | GridFS id of the stored bytes. Shared by every file with the same content. |
+| `source`, `relative_path` | Where the file came from. Unique together. |
+| `original_file_path` | Absolute path at upload time, for humans. |
+| `file_hash` | SHA-256 hex digest of the content. Indexed. |
+| `file_size` | Size in bytes. |
+| `mime_type` | Guessed from the file name, may be null. |
+| `last_modified`, `uploaded_at` | UTC timestamps. |
+
+## Upgrading from the previous version
+
+Earlier releases computed the hash after upload and, due to a bug, recorded the
+hash of empty input for every file. Run `python main.py digest` once. It finds
+documents carrying that value or no hash at all and recomputes them from the
+stored bytes. Duplicate blobs that the old version stored in full are left in
+place; only new uploads are deduplicated.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The integration tests need a reachable MongoDB and skip themselves otherwise.
+Point them at a specific instance with `TEST_MONGO_URI`. Each test uses a
+throwaway database that is dropped afterwards.
 
 ## License
-This project is licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0) License.
 
-Under this license, you are free to:
-- **Share**: Copy and redistribute the material in any medium or format.
-- **Adapt**: Remix, transform, and build upon the material for any purpose, even commercially.
-
-**Attribution** is required: You must give appropriate credit, provide a link to the license, and indicate if changes were made.
-
+Creative Commons Attribution 4.0 International (CC BY 4.0).
